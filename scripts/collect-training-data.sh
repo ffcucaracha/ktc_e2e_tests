@@ -7,7 +7,7 @@ E2E_DIR="$ROOT_DIR/ktc_e2e_tests"
 
 cd "$FRONTEND_DIR"
 docker compose up -d --build postgres ktc-backend
-AI_ENABLED=false docker compose up -d --build --force-recreate backend
+AI_ENABLED=false docker compose up -d --build --force-recreate --wait --wait-timeout 120 backend
 
 cd "$E2E_DIR"
 mkdir -p "$E2E_DIR/artifacts"
