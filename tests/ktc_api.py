@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -10,12 +11,37 @@ import urllib3
 class KtcApi:
     def __init__(self, base_url: str, username: str, password: str) -> None:
         self._base_url = base_url.rstrip("/")
+        self._health_url = f"{self._base_url.removesuffix('/api/v1')}/health/ready"
         self._username = username
         self._password = password
         self._http = urllib3.PoolManager()
         self._token: str | None = None
 
+    def wait_until_ready(self, timeout_seconds: float = 90) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        last_error = "backend did not answer"
+
+        while time.monotonic() < deadline:
+            try:
+                response = self._http.request(
+                    "GET",
+                    self._health_url,
+                    timeout=urllib3.Timeout(connect=2, read=2),
+                    retries=False,
+                )
+                if response.status == 200:
+                    return
+                last_error = f"HTTP {response.status}"
+            except Exception as exc:  # noqa: BLE001 - readiness probe must tolerate startup failures
+                last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(1)
+
+        raise RuntimeError(
+            f"backend is not ready at {self._health_url} after {timeout_seconds}s: {last_error}"
+        )
+
     def login(self) -> None:
+        self.wait_until_ready()
         payload = self._request(
             "POST",
             "/auth/login",
