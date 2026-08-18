@@ -32,7 +32,7 @@ services:
       E2E_SCENARIO_CODES: ${E2E_SCENARIO_CODES:-oil-heating-basic-startup,oil-heating-basic-shutdown,oil-heating-flow-control,oil-heating-wrong-sequence-training,oil-heating-reaction-time-training}
       SELENIUM_REMOTE_URL: ${SELENIUM_REMOTE_URL:-http://selenium:4444/wd/hub}
     volumes:
-      - ./artifacts:/tests/artifacts
+      - .:/tests
     depends_on:
       selenium:
         condition: service_healthy
