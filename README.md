@@ -5,7 +5,7 @@
 В репозитории есть два типа проверок:
 
 - Selenium smoke/E2E для операторского интерфейса;
-- API-driven data collection tests, которые много раз проходят учебный сценарий успешно и с ошибками, чтобы backend накопил timeline, `OperatorError` и `TrainingResult` для последующего обучения ML-модели.
+- API-driven data collection tests, которые много раз проходят учебные сценарии успешно и с ошибками, чтобы backend накопил timeline, `OperatorError` и `TrainingResult` для последующего обучения ML-модели.
 
 ## Обычный Selenium E2E
 
@@ -25,40 +25,66 @@
 ./scripts/collect-training-data.sh
 ```
 
-По умолчанию создаются 5 успешных и 5 неуспешных прохождений сценария `oil-heating-wrong-sequence-training`.
-
-Успешное прохождение выполняет ожидаемую последовательность:
+По умолчанию покрываются все пять сценариев тренажёра подогрева нефти:
 
 ```text
-H1A -> H1B -> H1V
+oil-heating-basic-startup
+oil-heating-basic-shutdown
+oil-heating-flow-control
+oil-heating-wrong-sequence-training
+oil-heating-reaction-time-training
 ```
 
-Неуспешное прохождение случайно выбирает один из двух вариантов:
+Для каждого сценария создаются `E2E_DATASET_RUNS` успешных и столько же неуспешных прохождений. При значении по умолчанию `5` получается 50 сессий: 5 сценариев × (5 success + 5 failure).
+
+Успешные прохождения выполняют ожидаемые действия конкретного сценария. Для `flow-control` значения FRC404/FRC405/FRC406 случайно выбираются внутри допустимого диапазона 42–58%, поэтому успешные записи не идентичны друг другу.
+
+Неуспешные прохождения случайно используют подходящую для сценария стратегию:
 
 ```text
-wrong_sequence  -> случайная неправильная перестановка H1A/H1B/H1V
-missed_action   -> пропуск одного из обязательных насосов
+wrong_sequence -> нарушение порядка шагов
+missed_action  -> пропуск обязательного действия
+extra_action   -> лишняя команда после выполнения ожидаемых шагов
+wrong_setpoint -> значение регулятора вне диапазона 40–60% (только flow-control)
 ```
 
-Между действиями добавляются небольшие случайные задержки. Они нужны не для искусственного создания `LATE_ACTION`, а чтобы сессии отличались по времени и server-side telemetry успевала сохранить разные snapshots.
+Между действиями добавляются небольшие случайные задержки. Они нужны прежде всего для разнообразия временной структуры сессий и для того, чтобы server-side telemetry успевала сохранить разные snapshots. Для сценария `reaction-time` эти микрозадержки намеренно остаются меньше его 5-секундного лимита в успешных прохождениях; неуспешные примеры там создаются через нарушения последовательности, пропуски и лишние действия, чтобы сбор не зависел от особенностей clock/revision конкретной версии `ktc_backend`.
 
-Настройки:
+### Почему не включён `boiler-basic-startup`
+
+В application backend есть ещё демонстрационный сценарий котла, но текущий ML risk feature contract построен вокруг `oil-heating-ktc`: H1A/H1B/H1V, FRC404/FRC405/FRC406 и соответствующих process sensors. Добавлять boiler-сессии в тот же набор тренировочных данных означало бы смешивать разные пространства признаков. Поэтому data collection для ML покрывает все сценарии именно `oil-heating-ktc`, а boiler остаётся отдельным UI/demo контуром.
+
+## Настройки генератора
 
 ```bash
-E2E_DATASET_RUNS=5                 # количество успешных И неуспешных сессий
-E2E_RANDOM_SEED=12345              # необязательно; если задан, прогон воспроизводим
+E2E_DATASET_RUNS=5
+E2E_RANDOM_SEED=12345
 E2E_MIN_ACTION_DELAY_SECONDS=0.4
 E2E_MAX_ACTION_DELAY_SECONDS=1.4
 E2E_SETTLE_DELAY_SECONDS=2.2
 E2E_SIMULATOR_CODE=oil-heating-ktc
-E2E_SCENARIO_CODE=oil-heating-wrong-sequence-training
+E2E_SCENARIO_CODES=oil-heating-basic-startup,oil-heating-basic-shutdown,oil-heating-flow-control,oil-heating-wrong-sequence-training,oil-heating-reaction-time-training
 ```
 
-Пример более крупного сбора:
+`E2E_RANDOM_SEED` необязателен. Если его не задавать, каждый запуск получает новый seed. Если сохранить seed из вывода теста, конкретный набор случайных стратегий и setpoint можно воспроизвести.
+
+Можно собирать только часть сценариев:
+
+```bash
+E2E_SCENARIO_CODES=oil-heating-flow-control,oil-heating-reaction-time-training \
+E2E_DATASET_RUNS=10 \
+./scripts/collect-training-data.sh
+```
+
+Пример более крупного полного сбора:
 
 ```bash
 E2E_DATASET_RUNS=25 ./scripts/collect-training-data.sh
 ```
+
+Это создаст 250 сессий: 5 сценариев × (25 success + 25 failure).
+
+## Manifest
 
 Тесты пишут небольшой manifest в:
 
@@ -66,7 +92,21 @@ E2E_DATASET_RUNS=25 ./scripts/collect-training-data.sh
 artifacts/training-data-runs.jsonl
 ```
 
-Там находятся только служебные сведения о прогоне: `session_id`, seed, тип прохождения, стратегия ошибки, score и error types. Сами ML-данные остаются в PostgreSQL основного приложения — именно там хранятся authoritative timeline и assessment.
+В нём сохраняются служебные сведения:
+
+```text
+session_id
+seed
+run
+outcome
+strategy
+scenario_code
+score
+errors
+steps
+```
+
+Для `flow-control` в `steps` также видны фактически выбранные setpoint. Сам ML dataset в этот файл не складывается: authoritative timeline и assessment остаются в PostgreSQL основного приложения.
 
 После накопления сессий экспорт выполняется уже из `ktc_frontend`:
 
@@ -98,4 +138,6 @@ pytest -q -s tests/test_training_data_collection.py
 
 ## Почему data collection идёт через API
 
-Для набора датасета нам важны действия, которые реально проходят через application backend и сохраняются в его timeline. Использование REST API здесь быстрее и стабильнее браузера, при этом не обходит assessment или persistence слой. Selenium оставлен для проверки UI и не дублируется десятками однотипных прогонов.
+Для датасета важны действия, которые реально проходят через application backend и сохраняются в его timeline. REST API здесь быстрее и стабильнее браузера, но не обходит assessment или persistence layer. Selenium остаётся для проверки UI и не запускается десятки раз ради однотипного накопления данных.
+
+Обычный `./scripts/run.sh` исключает marker `data_collection`, поэтому массовый сбор сессий запускается только явно через `./scripts/collect-training-data.sh`.

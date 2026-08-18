@@ -52,7 +52,13 @@ class KtcApi:
             expected_statuses=(201,),
         )
 
-    def send_command(self, session_id: str, equipment_id: str, action: str) -> dict[str, Any]:
+    def send_command(
+        self,
+        session_id: str,
+        equipment_id: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return self._request(
             "POST",
             f"/simulation-sessions/{session_id}/commands",
@@ -60,7 +66,7 @@ class KtcApi:
                 "command_id": str(uuid4()),
                 "equipment_id": equipment_id,
                 "action": action,
-                "payload": {},
+                "payload": payload or {},
                 "expected_revision": None,
             },
         )
