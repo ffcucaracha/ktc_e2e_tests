@@ -41,12 +41,17 @@ class KtcApi:
         )
 
     def login(self) -> None:
-        self.wait_until_ready()
+        self._authenticate(wait_ready=True)
+
+    def _authenticate(self, *, wait_ready: bool) -> None:
+        if wait_ready:
+            self.wait_until_ready()
         payload = self._request(
             "POST",
             "/auth/login",
             body={"username": self._username, "password": self._password},
             auth=False,
+            retry_auth=False,
         )
         token = payload.get("access_token")
         if not isinstance(token, str) or not token:
@@ -111,6 +116,7 @@ class KtcApi:
         body: dict[str, Any] | None = None,
         auth: bool = True,
         expected_statuses: tuple[int, ...] = (200,),
+        retry_auth: bool = True,
     ) -> dict[str, Any]:
         headers = {"content-type": "application/json"}
         if auth:
@@ -125,6 +131,18 @@ class KtcApi:
             body=json.dumps(body).encode("utf-8") if body is not None else None,
             timeout=urllib3.Timeout(connect=3, read=30),
         )
+
+        if auth and retry_auth and response.status == 401:
+            self._authenticate(wait_ready=False)
+            return self._request(
+                method,
+                path,
+                body=body,
+                auth=True,
+                expected_statuses=expected_statuses,
+                retry_auth=False,
+            )
+
         raw = response.data.decode("utf-8")
         if response.status not in expected_statuses:
             raise AssertionError(
