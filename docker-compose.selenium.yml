@@ -15,6 +15,7 @@ services:
   tests:
     build:
       context: .
+    command: ["pytest", "-q", "-m", "not data_collection"]
     environment:
       E2E_BASE_URL: ${E2E_BASE_URL:-http://frontend:5173}
       E2E_API_BASE_URL: ${E2E_API_BASE_URL:-http://backend:8000/api/v1}
