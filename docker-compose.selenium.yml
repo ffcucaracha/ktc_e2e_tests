@@ -17,9 +17,18 @@ services:
       context: .
     environment:
       E2E_BASE_URL: ${E2E_BASE_URL:-http://frontend:5173}
+      E2E_API_BASE_URL: ${E2E_API_BASE_URL:-http://backend:8000/api/v1}
       E2E_OPERATOR_USERNAME: ${E2E_OPERATOR_USERNAME:-e2e-operator}
       E2E_OPERATOR_PASSWORD: ${E2E_OPERATOR_PASSWORD:-change-me-e2e-operator-password}
       E2E_SCREENSHOT_DIR: ${E2E_SCREENSHOT_DIR:-/tests/artifacts/screenshots}
+      E2E_TRAINING_MANIFEST: ${E2E_TRAINING_MANIFEST:-/tests/artifacts/training-data-runs.jsonl}
+      E2E_DATASET_RUNS: ${E2E_DATASET_RUNS:-5}
+      E2E_RANDOM_SEED: ${E2E_RANDOM_SEED:-}
+      E2E_MIN_ACTION_DELAY_SECONDS: ${E2E_MIN_ACTION_DELAY_SECONDS:-0.4}
+      E2E_MAX_ACTION_DELAY_SECONDS: ${E2E_MAX_ACTION_DELAY_SECONDS:-1.4}
+      E2E_SETTLE_DELAY_SECONDS: ${E2E_SETTLE_DELAY_SECONDS:-2.2}
+      E2E_SIMULATOR_CODE: ${E2E_SIMULATOR_CODE:-oil-heating-ktc}
+      E2E_SCENARIO_CODE: ${E2E_SCENARIO_CODE:-oil-heating-wrong-sequence-training}
       SELENIUM_REMOTE_URL: ${SELENIUM_REMOTE_URL:-http://selenium:4444/wd/hub}
     volumes:
       - ./artifacts:/tests/artifacts
