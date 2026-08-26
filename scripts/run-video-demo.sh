@@ -22,12 +22,28 @@ VIDEO_FILE="${VIDEO_FILE:-$VIDEO_DIR/championship-demo-$(date +%Y%m%d-%H%M%S).mk
 VIDEO_FPS="${VIDEO_FPS:-30}"
 VIDEO_RECORDER="${VIDEO_RECORDER:-auto}"
 VIDEO_RECORDER_PID=""
+VIDEO_RECORDER_LOG=""
 
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
   PYTHON="$ROOT_DIR/.venv/bin/python"
 else
   PYTHON="${PYTHON:-python3}"
 fi
+
+check_python_dependencies() {
+  "$PYTHON" - <<'PY'
+import importlib.util
+import sys
+
+required = ("pytest", "selenium", "urllib3")
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+
+print(sys.executable)
+if missing:
+    print("Missing Python dependencies: " + ", ".join(missing), file=sys.stderr)
+    sys.exit(2)
+PY
+}
 
 stop_recorder() {
   if [[ -n "$VIDEO_RECORDER_PID" ]] && kill -0 "$VIDEO_RECORDER_PID" 2>/dev/null; then
@@ -55,6 +71,13 @@ start_recorder() {
     local command="${VIDEO_RECORDER_COMMAND//\{output\}/$VIDEO_FILE}"
     bash -lc "$command" &
     VIDEO_RECORDER_PID=$!
+    sleep 1
+    if ! kill -0 "$VIDEO_RECORDER_PID" 2>/dev/null; then
+      wait "$VIDEO_RECORDER_PID" 2>/dev/null || true
+      VIDEO_RECORDER_PID=""
+      echo "Custom screen recorder exited before the demo started." >&2
+      exit 2
+    fi
     return
   fi
 
@@ -73,11 +96,21 @@ start_recorder() {
 
     local screen_size="${VIDEO_SCREEN_SIZE:-}"
     if [[ -z "$screen_size" ]] && command -v xdpyinfo >/dev/null 2>&1; then
-      screen_size="$(xdpyinfo | awk '/dimensions:/{print $2; exit}')"
+      echo "Detecting X11 screen size..."
+      if command -v timeout >/dev/null 2>&1; then
+        screen_size="$(timeout 3s xdpyinfo 2>"$VIDEO_DIR/xdpyinfo.log" | awk '/dimensions:/{print $2; exit}' || true)"
+      else
+        screen_size="$(xdpyinfo 2>"$VIDEO_DIR/xdpyinfo.log" | awk '/dimensions:/{print $2; exit}' || true)"
+      fi
+      if [[ -z "$screen_size" ]]; then
+        echo "Could not detect X11 screen size; using 1920x1080." >&2
+        echo "xdpyinfo log: $VIDEO_DIR/xdpyinfo.log" >&2
+      fi
     fi
     screen_size="${screen_size:-1920x1080}"
 
     echo "Recorder: ffmpeg/x11grab (${screen_size}, ${VIDEO_FPS} fps)"
+    VIDEO_RECORDER_LOG="$VIDEO_DIR/ffmpeg.log"
     ffmpeg -y \
       -f x11grab \
       -framerate "$VIDEO_FPS" \
@@ -88,22 +121,34 @@ start_recorder() {
       -crf 20 \
       -pix_fmt yuv420p \
       "$VIDEO_FILE" \
-      >"$VIDEO_DIR/ffmpeg.log" 2>&1 &
+      >"$VIDEO_RECORDER_LOG" 2>&1 &
     VIDEO_RECORDER_PID=$!
+    sleep 1
+    if ! kill -0 "$VIDEO_RECORDER_PID" 2>/dev/null; then
+      wait "$VIDEO_RECORDER_PID" 2>/dev/null || true
+      VIDEO_RECORDER_PID=""
+      echo "ffmpeg screen recorder exited before the demo started." >&2
+      echo "Log: $VIDEO_RECORDER_LOG" >&2
+      tail -80 "$VIDEO_RECORDER_LOG" >&2 || true
+      exit 2
+    fi
     return
   fi
 
   if [[ "$VIDEO_RECORDER" == "wf-recorder" || "$VIDEO_RECORDER" == "auto" ]]; then
     if command -v wf-recorder >/dev/null 2>&1; then
       echo "Recorder: wf-recorder (${VIDEO_FPS} fps)"
+      VIDEO_RECORDER_LOG="$VIDEO_DIR/wf-recorder.log"
       wf-recorder -f "$VIDEO_FILE" -r "$VIDEO_FPS" \
-        >"$VIDEO_DIR/wf-recorder.log" 2>&1 &
+        >"$VIDEO_RECORDER_LOG" 2>&1 &
       VIDEO_RECORDER_PID=$!
       sleep 1
       if ! kill -0 "$VIDEO_RECORDER_PID" 2>/dev/null; then
         wait "$VIDEO_RECORDER_PID" 2>/dev/null || true
         VIDEO_RECORDER_PID=""
         echo "wf-recorder could not start on this Wayland compositor." >&2
+        echo "Log: $VIDEO_RECORDER_LOG" >&2
+        tail -80 "$VIDEO_RECORDER_LOG" >&2 || true
         echo "On KDE Wayland, either log in to an X11 session for fully automatic recording" >&2
         echo "or set VIDEO_RECORDER_COMMAND to your preferred recorder command." >&2
         exit 2
@@ -125,6 +170,18 @@ echo "  ML warning wait: ${DEMO_AI_WARNING_WAIT_SECONDS}s"
 echo "  result/LLM wait: ${DEMO_RESULT_WAIT_SECONDS}s"
 echo "  session type:    ${XDG_SESSION_TYPE:-unknown}"
 echo "  output:           $VIDEO_FILE"
+printf "  python:           "
+if ! check_python_dependencies; then
+  echo
+  echo "Install e2e dependencies with:" >&2
+  echo "  cd $ROOT_DIR" >&2
+  echo "  python3 -m venv .venv" >&2
+  echo "  .venv/bin/python -m pip install -r requirements.txt" >&2
+  echo
+  echo "Or run the demo with an existing prepared interpreter:" >&2
+  echo "  PYTHON=/path/to/venv/bin/python $0" >&2
+  exit 2
+fi
 echo
 
 start_recorder
