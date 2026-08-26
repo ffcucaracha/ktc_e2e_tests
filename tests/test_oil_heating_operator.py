@@ -109,7 +109,7 @@ def test_operator_can_run_oil_heating_and_adjust_valves(
     open_oil_heating_simulator(driver, screenshot)
     start_session(driver, screenshot)
 
-    for pump_id in ("H1A", "H1B", "H1V"):
+    for pump_id in ("H1A", "H1B", "H1C"):
         click_pump(driver, pump_id)
     screenshot("04-pumps-started")
 

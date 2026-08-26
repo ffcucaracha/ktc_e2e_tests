@@ -28,8 +28,9 @@ services:
       E2E_MIN_ACTION_DELAY_SECONDS: ${E2E_MIN_ACTION_DELAY_SECONDS:-0.4}
       E2E_MAX_ACTION_DELAY_SECONDS: ${E2E_MAX_ACTION_DELAY_SECONDS:-1.4}
       E2E_SETTLE_DELAY_SECONDS: ${E2E_SETTLE_DELAY_SECONDS:-2.2}
-      E2E_SIMULATOR_CODE: ${E2E_SIMULATOR_CODE:-oil-heating-ktc}
-      E2E_SCENARIO_CODES: ${E2E_SCENARIO_CODES:-oil-heating-basic-startup,oil-heating-basic-shutdown,oil-heating-flow-control,oil-heating-wrong-sequence-training,oil-heating-reaction-time-training}
+      E2E_SIMULATOR_CODE: ${E2E_SIMULATOR_CODE:-all}
+      E2E_SCENARIO_CODES: ${E2E_SCENARIO_CODES:-oil-heating-basic-startup,oil-heating-basic-shutdown,oil-heating-flow-control,oil-heating-wrong-sequence-training,oil-heating-reaction-time-training,oil-heating-elou-integrated-startup,oil-heating-elou-drainage-control}
+      E2E_LATE_ACTION_DELAY_SECONDS: ${E2E_LATE_ACTION_DELAY_SECONDS:-6.2}
       SELENIUM_REMOTE_URL: ${SELENIUM_REMOTE_URL:-http://selenium:4444/wd/hub}
     volumes:
       - .:/tests

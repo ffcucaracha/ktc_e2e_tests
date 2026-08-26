@@ -102,6 +102,9 @@ class KtcApi:
             },
         )
 
+    def state(self, session_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/simulation-sessions/{session_id}/state")["state"]
+
     def stop_session(self, session_id: str) -> dict[str, Any]:
         return self._request("POST", f"/simulation-sessions/{session_id}/stop")
 
