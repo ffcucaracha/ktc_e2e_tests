@@ -209,25 +209,28 @@ def set_dosing(
     section_title: str,
     start_after_set: bool,
 ) -> None:
-    label = wait(driver, 20).until(
-        EC.presence_of_element_located((By.XPATH, f"//label[normalize-space(.)={field_label!r}]")),
+    title_literal = xpath_literal(section_title)
+    label_literal = xpath_literal(field_label)
+    section = wait(driver, 20).until(
+        EC.presence_of_element_located(
+            (
+                By.XPATH,
+                "//*[normalize-space(.)="
+                f"{title_literal}]"
+                "/ancestor::*[.//label[normalize-space(.)="
+                f"{label_literal}] and .//button[normalize-space(.)='Задать']][1]",
+            ),
+        ),
     )
+    label = section.find_element(By.XPATH, f".//label[normalize-space(.)={label_literal}]")
     input_id = label.get_attribute("for")
     if not input_id:
         raise AssertionError(f"Поле {field_label} не связано с input")
-    field = driver.find_element(By.ID, input_id)
+    field = section.find_element(By.ID, input_id)
     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", field)
     pace(0.8)
     field.send_keys(Keys.CONTROL, "a")
     field.send_keys(str(value))
-
-    section = field.find_element(By.XPATH, "./ancestor::div[contains(@class, 'MuiBox-root')][1]")
-    for _ in range(5):
-        if section_title in section.text and "Задать" in section.text:
-            break
-        section = section.find_element(By.XPATH, "..")
-    else:
-        raise AssertionError(f"Не найден контейнер {section_title}")
 
     set_button = section.find_element(By.XPATH, ".//button[normalize-space(.)='Задать']")
     wait(driver, 20).until(lambda _: set_button.is_enabled())
