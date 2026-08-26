@@ -38,11 +38,15 @@ oil-heating-elou-integrated-startup
 oil-heating-elou-drainage-control
 ```
 
-Для каждого сценария создаются `E2E_DATASET_RUNS` успешных и столько же неуспешных прохождений. При значении по умолчанию `5` получается 70 сессий: 7 сценариев × (5 success + 5 failure).
+Для каждого сценария создаются ровно `E2E_DATASET_RUNS` успешных и столько же неуспешных прохождений. При значении по умолчанию `5` получается 70 сессий: 7 сценариев × (5 success + 5 failure).
+
+Все scenario/outcome jobs сначала формируются, затем глобально перемешиваются. Поэтому генератор больше не выполняет сначала большой блок одного сценария, затем следующего. Это уменьшает искусственную корреляцию признаков `previous_errors_*` с порядком запуска тестов и даёт более равномерный historical profile.
 
 Успешные прохождения выполняют ожидаемые действия конкретного сценария. Для `flow-control` значения FRC404/FRC405/FRC406 случайно выбираются внутри допустимого диапазона 42–58%. Для полного цикла варьируются FRC404, FRC407, ND1, ND2 и FRC408 внутри допустимых диапазонов, поэтому записи не идентичны друг другу.
 
-Неуспешные прохождения случайно используют подходящую для сценария стратегию:
+Неуспешные прохождения больше не выбирают strategy независимым `random.choice`. Для каждого сценария строится циклический список его failure strategies, начиная со случайного offset, после чего он перемешивается. Это означает, что при достаточном `E2E_DATASET_RUNS` стратегии реально покрываются, а не могут случайно отсутствовать во всём batch.
+
+Поддерживаемые стратегии:
 
 ```text
 wrong_sequence -> нарушение порядка шагов
@@ -57,7 +61,11 @@ early_e1_voltage      -> подача напряжения E1 до ожидае�
 late_action           -> намеренная задержка больше лимита reaction-time
 ```
 
-Между действиями добавляются небольшие случайные задержки. Они нужны прежде всего для разнообразия временной структуры сессий и для того, чтобы server-side telemetry успевала сохранить разные snapshots. Для сценария `reaction-time` часть неуспешных примеров создаётся намеренной задержкой, но остальные ошибки формируются через порядок, пропуски, лишние действия и неверные уставки. Это снижает риск, что модель выучит только `time_since_last_action_s`.
+Для `oil-heating-reaction-time-training` стратегия `late_action` специально имеет повышенную долю в failure cycle. Это единственный текущий сценарий, где backend assessment ожидает time-limit error, поэтому такой sampling нужен, чтобы `LATE_ACTION` не исчезал из небольших batch.
+
+Между действиями добавляются небольшие случайные задержки. Они нужны прежде всего для разнообразия временной структуры сессий и для того, чтобы server-side telemetry успевала сохранить разные snapshots.
+
+Важно: `MISSED_ACTION` в текущем application backend создаётся только при финализации сессии и хранится с `occurred_at_ms = null`. Текущий ML target builder учитывает только ошибки с конкретным `occurred_at_ms`, поэтому `missed_action` полезен для assessment/profile coverage, но сам по себе пока не создаёт positive `ERROR_IN_NEXT_10_SECONDS` rows. Исправлять это нужно на стороне exporter/target semantics, а не искусственно маскировать E2E-генератором.
 
 ### Что теперь попадает в ML-признаки
 
@@ -92,7 +100,9 @@ E2E_SIMULATOR_CODE=all
 E2E_SCENARIO_CODES=oil-heating-basic-startup,oil-heating-basic-shutdown,oil-heating-flow-control,oil-heating-wrong-sequence-training,oil-heating-reaction-time-training,oil-heating-elou-integrated-startup,oil-heating-elou-drainage-control
 ```
 
-`E2E_RANDOM_SEED` необязателен. Если его не задавать, каждый запуск получает новый seed. Если сохранить seed из вывода теста, конкретный набор случайных стратегий и setpoint можно воспроизвести.
+`E2E_RANDOM_SEED` необязателен. Если его не задавать, каждый запуск получает новый seed. Если сохранить seed из вывода теста, конкретный job order, strategy schedule и setpoint можно воспроизвести.
+
+Для устойчивого покрытия всех failure strategies лучше брать `E2E_DATASET_RUNS` не меньше максимального числа стратегий у выбранных сценариев. Для полного набора это минимум `7`; для более стабильного ML-сбора разумный диапазон — `15–30`.
 
 Можно собирать только часть сценариев:
 
@@ -116,7 +126,7 @@ E2E_DATASET_RUNS=10 \
 E2E_DATASET_RUNS=25 ./scripts/collect-training-data.sh
 ```
 
-Это создаст 350 сессий: 7 сценариев × (25 success + 25 failure).
+Это создаст 350 сессий: 7 сценариев × (25 success + 25 failure), но сценарии и outcomes будут перемешаны в одном batch.
 
 ## Manifest
 
@@ -143,14 +153,28 @@ steps
 
 Для сценариев с уставками в `steps` видны фактически выбранные setpoint. Сам ML dataset в этот файл не складывается: authoritative timeline и assessment остаются в PostgreSQL основного приложения.
 
-После накопления сессий экспорт выполняется уже из `ktc_frontend`:
+После накопления сессий экспорт выполняется уже из `ktc_frontend`.
+
+При Docker-запуске рекомендуемая цепочка:
 
 ```bash
-cd ../ktc_frontend/backend
-python -m app.commands.export_ml_sessions --output /tmp/session_exports.jsonl
+cd ../ktc_frontend
 
-cd ../ai-service
-python -m scripts.generate_dataset /tmp/session_exports.jsonl datasets/risk.csv
+docker compose exec backend \
+  python -m app.commands.export_ml_sessions \
+  --output /tmp/session_exports.jsonl
+
+docker compose cp \
+  backend:/tmp/session_exports.jsonl \
+  ./ai-service/datasets/session_exports.jsonl
+
+docker compose run --rm \
+  -v "$PWD/ai-service:/workspace" \
+  -w /workspace \
+  ai-service \
+  python -m scripts.generate_dataset \
+  datasets/session_exports.jsonl \
+  datasets/risk.csv
 ```
 
 ## Переменные подключения

@@ -52,6 +52,14 @@ class ScenarioSpec:
     failure_strategies: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CollectionJob:
+    scenario_code: str
+    outcome: str
+    run: int
+    strategy: str
+
+
 def _step(equipment_id: str, action: str, value: int | float | None = None) -> CommandStep:
     payload: dict[str, object] = {} if value is None else {"value": value}
     return CommandStep(equipment_id, action, payload)
@@ -134,7 +142,9 @@ SCENARIOS: dict[str, ScenarioSpec] = {
     "oil-heating-reaction-time-training": ScenarioSpec(
         simulator_code="oil-heating-ktc",
         success_plan=_sequence_plan,
-        failure_strategies=("late_action", "wrong_sequence", "missed_action"),
+        # Keep late_action twice in the cycle so the only scenario capable of producing
+        # LATE_ACTION contributes enough examples without increasing its total session count.
+        failure_strategies=("late_action", "wrong_sequence", "late_action", "missed_action"),
     ),
     "oil-heating-elou-integrated-startup": ScenarioSpec(
         simulator_code="oil-heating-elou-ktc",
@@ -235,36 +245,88 @@ def _with_extra_action(steps: list[CommandStep], scenario_code: str) -> list[Com
     return [*steps, _step("KR5", "open")]
 
 
+def _failure_strategy_schedule(
+    spec: ScenarioSpec,
+    runs: int,
+    rng: random.Random,
+) -> list[str]:
+    """Spread failure strategies deterministically instead of sampling them independently."""
+    strategies = spec.failure_strategies
+    if not strategies:
+        raise AssertionError("scenario must define at least one failure strategy")
+
+    offset = rng.randrange(len(strategies))
+    scheduled = [strategies[(offset + index) % len(strategies)] for index in range(runs)]
+    rng.shuffle(scheduled)
+    return scheduled
+
+
 def _failure_plan(
     scenario_code: str,
+    strategy: str,
     rng: random.Random,
-) -> tuple[str, list[CommandStep], str]:
+) -> tuple[list[CommandStep], str]:
     spec = SCENARIOS[scenario_code]
+    if strategy not in spec.failure_strategies:
+        raise AssertionError(f"unsupported failure strategy for {scenario_code}: {strategy}")
     success = spec.success_plan(rng)
-    strategy = rng.choice(spec.failure_strategies)
 
     if strategy == "wrong_sequence":
-        return strategy, _wrong_sequence(success, rng), "WRONG_SEQUENCE"
+        return _wrong_sequence(success, rng), "WRONG_SEQUENCE"
     if strategy == "missed_action":
-        return strategy, _missed_action(success, rng), "MISSED_ACTION"
+        return _missed_action(success, rng), "MISSED_ACTION"
     if strategy == "late_action":
-        return strategy, _late_action(success, rng), "LATE_ACTION"
+        return _late_action(success, rng), "LATE_ACTION"
     if strategy == "wrong_nd1_setpoint":
-        return strategy, _replace_payload(success, ("ND1",), rng.choice((0, 45, 80))), "WRONG_ACTION"
+        return _replace_payload(success, ("ND1",), rng.choice((0, 45, 80))), "WRONG_ACTION"
     if strategy == "wrong_frc_setpoint":
-        return strategy, _replace_payload(success, ("FRC404", "FRC405", "FRC406"), rng.choice((20, 75))), "WRONG_ACTION"
+        return _replace_payload(success, ("FRC404", "FRC405", "FRC406"), rng.choice((20, 75))), "WRONG_ACTION"
     if strategy == "wrong_frc407_setpoint":
-        return strategy, _replace_payload(success, ("FRC407",), rng.choice((10, 25))), "WRONG_ACTION"
+        return _replace_payload(success, ("FRC407",), rng.choice((10, 25))), "WRONG_ACTION"
     if strategy == "wrong_nd2_setpoint":
-        return strategy, _replace_payload(success, ("ND2",), rng.choice((15, 30, 70))), "WRONG_ACTION"
+        return _replace_payload(success, ("ND2",), rng.choice((15, 30, 70))), "WRONG_ACTION"
     if strategy == "wrong_frc408_setpoint":
-        return strategy, _replace_payload(success, ("FRC408",), rng.choice((0, 25, 60))), "WRONG_ACTION"
+        return _replace_payload(success, ("FRC408",), rng.choice((0, 25, 60))), "WRONG_ACTION"
     if strategy == "early_e1_voltage":
-        return strategy, [*success[:8], _step("E1", "apply_voltage"), *success[8:]], "WRONG_ACTION"
+        return [*success[:8], _step("E1", "apply_voltage"), *success[8:]], "WRONG_ACTION"
     if strategy == "extra_action":
-        return strategy, _with_extra_action(success, scenario_code), "WRONG_ACTION"
+        return _with_extra_action(success, scenario_code), "WRONG_ACTION"
 
     raise AssertionError(f"unsupported failure strategy: {strategy}")
+
+
+def _collection_jobs(
+    scenario_codes: list[str],
+    runs: int,
+    rng: random.Random,
+) -> list[CollectionJob]:
+    """Build equal per-scenario success/failure counts and interleave all scenarios globally."""
+    jobs: list[CollectionJob] = []
+    for scenario_code in scenario_codes:
+        spec = SCENARIOS[scenario_code]
+        for index in range(runs):
+            jobs.append(
+                CollectionJob(
+                    scenario_code=scenario_code,
+                    outcome="success",
+                    run=index + 1,
+                    strategy="correct_plan",
+                )
+            )
+        for index, strategy in enumerate(_failure_strategy_schedule(spec, runs, rng), start=1):
+            jobs.append(
+                CollectionJob(
+                    scenario_code=scenario_code,
+                    outcome="failure",
+                    run=index,
+                    strategy=strategy,
+                )
+            )
+
+    # Do not collect scenario/error types in large sequential blocks. This reduces correlation
+    # between previous_errors_* features and the generator's execution order.
+    rng.shuffle(jobs)
+    return jobs
 
 
 def _append_manifest(item: dict[str, object]) -> None:
@@ -341,7 +403,7 @@ def _record(
 
 @pytest.mark.data_collection
 def test_collect_training_sessions_for_all_oil_heating_scenarios() -> None:
-    """Create positive and negative sessions across oil-heating and full-cycle scenarios."""
+    """Create balanced positive/negative sessions across oil-heating and full-cycle scenarios."""
     api = KtcApi(
         os.getenv("E2E_API_BASE_URL", "http://localhost:8000/api/v1"),
         os.getenv("E2E_OPERATOR_USERNAME", "e2e-operator"),
@@ -356,66 +418,57 @@ def test_collect_training_sessions_for_all_oil_heating_scenarios() -> None:
         simulator_code: api.find_simulator(simulator_code)
         for simulator_code in sorted({SCENARIOS[code].simulator_code for code in scenario_codes})
     }
-    print(
-        f"training-data seed={seed}; runs_per_class_per_scenario={runs}; "
-        f"scenarios={','.join(scenario_codes)}"
-    )
-
+    scenario_context: dict[str, tuple[str, str]] = {}
     for scenario_code in scenario_codes:
         spec = SCENARIOS[scenario_code]
         simulator = simulators[spec.simulator_code]
         simulator_id = str(simulator["id"])
         scenario = api.find_scenario(simulator_id, scenario_code)
-        scenario_id = str(scenario["id"])
+        scenario_context[scenario_code] = (simulator_id, str(scenario["id"]))
 
-        for index in range(runs):
+    jobs = _collection_jobs(scenario_codes, runs, rng)
+    print(
+        f"training-data seed={seed}; runs_per_class_per_scenario={runs}; "
+        f"total_sessions={len(jobs)}; scenarios={','.join(scenario_codes)}"
+    )
+
+    for job in jobs:
+        spec = SCENARIOS[job.scenario_code]
+        simulator_id, scenario_id = scenario_context[job.scenario_code]
+
+        if job.outcome == "success":
             steps = spec.success_plan(rng)
-            session_id, assessment = _run_session(
-                api,
-                simulator_id=simulator_id,
-                scenario_id=scenario_id,
-                steps=steps,
-                rng=rng,
-            )
-            result = assessment["result"]
-            errors = assessment["errors"]
-            assert result["error_count"] == 0, errors
-            _record(
-                seed=seed,
-                run=index + 1,
-                outcome="success",
-                strategy="correct_plan",
-                simulator_code=spec.simulator_code,
-                scenario_code=scenario_code,
-                session_id=session_id,
-                result=result,
-                errors=errors,
-                steps=steps,
-            )
+            expected_error = None
+        else:
+            steps, expected_error = _failure_plan(job.scenario_code, job.strategy, rng)
 
-        for index in range(runs):
-            strategy, steps, expected_error = _failure_plan(scenario_code, rng)
-            session_id, assessment = _run_session(
-                api,
-                simulator_id=simulator_id,
-                scenario_id=scenario_id,
-                steps=steps,
-                rng=rng,
-            )
-            result = assessment["result"]
-            errors = assessment["errors"]
-            error_types = [str(item["error_type"]) for item in errors]
+        session_id, assessment = _run_session(
+            api,
+            simulator_id=simulator_id,
+            scenario_id=scenario_id,
+            steps=steps,
+            rng=rng,
+        )
+        result = assessment["result"]
+        errors = assessment["errors"]
+        error_types = [str(item["error_type"]) for item in errors]
+
+        if job.outcome == "success":
+            assert result["error_count"] == 0, errors
+        else:
             assert result["error_count"] > 0
+            assert expected_error is not None
             assert expected_error in error_types, error_types
-            _record(
-                seed=seed,
-                run=index + 1,
-                outcome="failure",
-                strategy=strategy,
-                simulator_code=spec.simulator_code,
-                scenario_code=scenario_code,
-                session_id=session_id,
-                result=result,
-                errors=errors,
-                steps=steps,
-            )
+
+        _record(
+            seed=seed,
+            run=job.run,
+            outcome=job.outcome,
+            strategy=job.strategy,
+            simulator_code=spec.simulator_code,
+            scenario_code=job.scenario_code,
+            session_id=session_id,
+            result=result,
+            errors=errors,
+            steps=steps,
+        )
