@@ -134,7 +134,12 @@ def find_clickable_equipment_button(driver: WebDriver, equipment_id: str) -> Web
     return next((button for button in buttons if button.is_displayed() and button.is_enabled()), None)
 
 
-def click_equipment_button(driver: WebDriver, equipment_id: str, seconds: int = 30) -> None:
+def click_equipment_button(
+    driver: WebDriver,
+    equipment_id: str,
+    seconds: int = 30,
+    pause_after: float = 1.8,
+) -> None:
     clickable = wait(driver, seconds).until(
         lambda current_driver: find_clickable_equipment_button(current_driver, equipment_id),
     )
@@ -217,7 +222,6 @@ def set_dosing(
     field.send_keys(str(value))
 
     section = field.find_element(By.XPATH, "./ancestor::div[contains(@class, 'MuiBox-root')][1]")
-    # If the nearest MUI box is the TextField itself, climb until the dosing title is in the container.
     for _ in range(5):
         if section_title in section.text and "Задать" in section.text:
             break
@@ -287,13 +291,11 @@ def run_integrated_startup_with_prediction(driver: WebDriver) -> None:
         nonlocal error_created
         if error_created:
             return
-        # Give realtime telemetry/AI a short opportunity to update after each valid command.
         pace(1.0)
         if show_ml_prediction(driver, seconds=4):
             intentional_extra_action(driver)
             error_created = True
 
-    # Exact success plan used by the ML dataset collector for oil-heating-elou-integrated-startup.
     click_equipment_button(driver, "KR1")
     after_correct_step()
 
@@ -334,8 +336,6 @@ def run_integrated_startup_with_prediction(driver: WebDriver) -> None:
     set_regulator(driver, "FRC408", 8)
     after_correct_step()
 
-    # Prefer the honest presentation: prediction must be visible before we intentionally err.
-    # If it has not happened during normal procedure, wait on the completed, otherwise-correct state.
     if not error_created:
         if not wait_for_ml_prediction(driver):
             raise AssertionError(
@@ -345,7 +345,6 @@ def run_integrated_startup_with_prediction(driver: WebDriver) -> None:
         intentional_extra_action(driver)
         error_created = True
 
-    # Show the post-error state briefly, while preserving the fact that the warning was shown first.
     driver.execute_script("window.scrollTo({top: 160, behavior: 'smooth'});")
     pace(5)
 
@@ -467,7 +466,6 @@ def test_championship_video_demo(driver: WebDriver, base_url: str) -> None:
     start_session(driver)
     reset_process_for_clean_demo(driver)
 
-    # Run the real procedure, let the model warn first, then make exactly one deliberate mistake.
     run_integrated_startup_with_prediction(driver)
 
     stop_session(driver)
