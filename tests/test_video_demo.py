@@ -5,6 +5,7 @@ import time
 
 import pytest
 from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver, WebElement
@@ -14,6 +15,14 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 def wait(driver: WebDriver, seconds: int = 30) -> WebDriverWait:
     return WebDriverWait(driver, seconds)
+
+
+def xpath_literal(value: str) -> str:
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    return "concat(" + ", \"'\", ".join(f"'{part}'" for part in value.split("'")) + ")"
 
 
 def pace(seconds: float) -> None:
@@ -27,12 +36,18 @@ def pace(seconds: float) -> None:
 
 def text_element(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
     return wait(driver, seconds).until(
-        EC.presence_of_element_located((By.XPATH, f"//*[contains(normalize-space(.), {text!r})]")),
+        EC.presence_of_element_located((By.XPATH, f"//*[contains(normalize-space(.), {xpath_literal(text)})]")),
     )
 
 
+def exact_text_element(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
+    literal = xpath_literal(text)
+    xpath = f"//*[normalize-space(.)={literal} and not(.//*[normalize-space(.)={literal}])]"
+    return wait(driver, seconds).until(EC.visibility_of_element_located((By.XPATH, xpath)))
+
+
 def scroll_to_text(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
-    element = text_element(driver, text, seconds)
+    element = exact_text_element(driver, text, seconds)
     driver.execute_script(
         "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
         element,
@@ -106,14 +121,25 @@ def reset_process_for_clean_demo(driver: WebDriver) -> None:
     pace(3)
 
 
-def click_equipment_button(driver: WebDriver, equipment_id: str) -> None:
-    buttons = driver.find_elements(
-        By.XPATH,
-        f"//button[contains(normalize-space(.), '{equipment_id}') and not(@disabled)]",
+def find_clickable_equipment_button(driver: WebDriver, equipment_id: str) -> WebElement | None:
+    aliases = [equipment_id]
+    if equipment_id.startswith("H1"):
+        aliases.append(f"Н-1{equipment_id[-1]}")
+
+    conditions = []
+    for alias in aliases:
+        literal = xpath_literal(alias)
+        conditions.append(f"contains(normalize-space(.), {literal})")
+        conditions.append(f"contains(@aria-label, {literal})")
+
+    buttons = driver.find_elements(By.XPATH, f"//button[({' or '.join(conditions)})]")
+    return next((button for button in buttons if button.is_displayed() and button.is_enabled()), None)
+
+
+def click_equipment_button(driver: WebDriver, equipment_id: str, seconds: int = 30) -> None:
+    clickable = wait(driver, seconds).until(
+        lambda current_driver: find_clickable_equipment_button(current_driver, equipment_id),
     )
-    clickable = next((button for button in buttons if button.is_displayed() and button.is_enabled()), None)
-    if clickable is None:
-        raise AssertionError(f"Не найдена доступная кнопка {equipment_id}")
     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", clickable)
     pace(1)
     clickable.click()
@@ -126,14 +152,48 @@ def set_regulator(driver: WebDriver, regulator_id: str, value: int) -> None:
     )
     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", slider)
     pace(1)
-    slider.send_keys(Keys.HOME)
-    for _ in range(value):
-        slider.send_keys(Keys.ARROW_RIGHT)
+
+    current = slider.get_attribute("aria-valuenow") or slider.get_attribute("value")
+    if current is not None and round(float(current)) == value:
+        pace(1)
+        return
+
+    slider_root = slider.find_element(By.XPATH, "./ancestor::*[contains(@class, 'MuiSlider-root')][1]")
+    size = slider_root.size
+    target_x = int((size["width"] * value / 100) - (size["width"] / 2))
+    ActionChains(driver).move_to_element_with_offset(slider_root, target_x, 0).click().perform()
+
+    driver.execute_script(
+        """
+        const input = arguments[0];
+        const value = String(arguments[1]);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        slider,
+        value,
+    )
+    slider.send_keys(Keys.ARROW_RIGHT)
+    slider.send_keys(Keys.ARROW_LEFT)
     pace(1)
 
-    container = slider.find_element(By.XPATH, "./ancestor::div[contains(@class, 'MuiBox-root')][1]")
+    container = slider.find_element(
+        By.XPATH,
+        f"./ancestor::*[.//button[normalize-space(.)='Применить'] and .//*[@aria-label={xpath_literal(f'{regulator_id} valve')}]][1]",
+    )
     apply_button = container.find_element(By.XPATH, ".//button[normalize-space(.)='Применить']")
-    wait(driver, 20).until(lambda _: apply_button.is_enabled())
+    try:
+        wait(driver, 20).until(lambda _: apply_button.is_enabled())
+    except TimeoutException as exc:
+        current = slider.get_attribute("aria-valuenow") or slider.get_attribute("value")
+        if current is not None and round(float(current)) == value:
+            pace(1)
+            return
+        raise AssertionError(
+            f"Регулятор {regulator_id} не изменился до {value}; текущее значение: {current}",
+        ) from exc
     apply_button.click()
     pace(2)
 
@@ -142,32 +202,27 @@ def demonstrate_operator_controls(driver: WebDriver) -> None:
     """Show several real controls before deliberately making a training mistake."""
     pace(3)
 
-    # Correct beginning of the procedure: inlet, feed pumps, then heat-distribution regulator.
+    # Correct beginning of the integrated procedure on the combined mnemonic.
     click_equipment_button(driver, "KR1")
     click_equipment_button(driver, "H1A")
     click_equipment_button(driver, "H1B")
     set_regulator(driver, "FRC404", 50)
 
-    # Hold the live mnemonic on screen long enough to see that state changed.
-    driver.execute_script("window.scrollTo({top: 180, behavior: 'smooth'});")
-    pace(5)
+    # Then show the lower ELOU control panel, which is the important second half of this simulator.
+    scroll_to_text(driver, "Блок ЭЛОУ", 30)
+    pace(2)
+    click_equipment_button(driver, "H3")
+    set_regulator(driver, "FRC408", 8)
+    pace(4)
 
 
 def intentional_wrong_action(driver: WebDriver) -> str:
     """Open KR6 too early to create a visually understandable sequence/process error."""
-    buttons = driver.find_elements(
-        By.XPATH,
-        "//button[contains(normalize-space(.), 'KR6') and not(@disabled)]",
-    )
-    clickable = next((button for button in buttons if button.is_displayed() and button.is_enabled()), None)
+    clickable = find_clickable_equipment_button(driver, "KR6")
     if clickable is None:
         # Stable fallback if KR6 is unavailable in a particular external-simulator state.
         for equipment_id in ("H1C", "KR2", "KR3"):
-            candidates = driver.find_elements(
-                By.XPATH,
-                f"//button[contains(normalize-space(.), '{equipment_id}') and not(@disabled)]",
-            )
-            clickable = next((button for button in candidates if button.is_displayed() and button.is_enabled()), None)
+            clickable = find_clickable_equipment_button(driver, equipment_id)
             if clickable is not None:
                 driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", clickable)
                 pace(1.5)
