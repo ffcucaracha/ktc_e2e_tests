@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 
 import pytest
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver, WebElement
 from selenium.webdriver.support import expected_conditions as EC
@@ -75,6 +76,32 @@ def try_intentional_wrong_action(driver: WebDriver) -> None:
             return
 
 
+def wait_for_ml_risk_warning(driver: WebDriver, screenshot: Screenshot) -> bool:
+    """Wait until the loaded model crosses its configured threshold.
+
+    The AI service exposes a non-null predicted_error_code only when the CatBoost
+    probability is greater than or equal to the threshold stored in model metadata.
+    Waiting for the prediction chip therefore follows the active model threshold
+    instead of hard-coding 20% in the Selenium test.
+    """
+    timeout = max(1, int(os.getenv("E2E_PRESENTATION_AI_WAIT_SECONDS", "30")))
+    locator = (
+        By.XPATH,
+        "//*[contains(normalize-space(.), 'Прогноз: ERROR_IN_NEXT_10_SECONDS')]",
+    )
+    try:
+        wait(driver, timeout).until(EC.visibility_of_element_located(locator))
+        return True
+    except TimeoutException:
+        print(
+            f"ML risk warning did not appear within {timeout}s; "
+            "saving a diagnostic screenshot and continuing presentation capture.",
+            flush=True,
+        )
+        screenshot("presentation-05-live-ml-risk-diagnostic")
+        return False
+
+
 def stop_session_and_wait_for_result(driver: WebDriver) -> None:
     stop_button = wait(driver, 30).until(
         EC.element_to_be_clickable(
@@ -126,11 +153,11 @@ def test_operator_presentation_screenshots(
     screenshot("presentation-04-live-elou-and-ai-instructor")
 
     try_intentional_wrong_action(driver)
-    time.sleep(4)
-    screenshot("presentation-05-live-after-intentional-error")
+    if wait_for_ml_risk_warning(driver, screenshot):
+        screenshot("presentation-05-live-ml-risk-warning")
 
     stop_session_and_wait_for_result(driver)
-    screenshot("presentation-06-result-summary-ai-warning")
+    screenshot("presentation-06-result-summary")
     save_after_scroll(driver, screenshot, "Timeline ключевых событий", "presentation-07-timeline-ml-and-errors")
     save_after_scroll(driver, screenshot, "Ошибки с объяснениями", "presentation-08-errors-with-explanations")
     save_after_scroll(driver, screenshot, "Интеллектуальный debrief", "presentation-09-llm-debrief")
