@@ -142,9 +142,10 @@ SCENARIOS: dict[str, ScenarioSpec] = {
     "oil-heating-reaction-time-training": ScenarioSpec(
         simulator_code="oil-heating-ktc",
         success_plan=_sequence_plan,
-        # Keep late_action twice in the cycle so the only scenario capable of producing
-        # LATE_ACTION contributes enough examples without increasing its total session count.
-        failure_strategies=("late_action", "wrong_sequence", "late_action", "missed_action"),
+        # A wall-clock sleep does not reliably produce LATE_ACTION because assessment prefers
+        # simulation_time_ms when the digital twin supplies it. Use deterministic rule errors
+        # here until the KTC API exposes an explicit way to advance simulation time.
+        failure_strategies=("wrong_sequence", "missed_action", "extra_action"),
     ),
     "oil-heating-elou-integrated-startup": ScenarioSpec(
         simulator_code="oil-heating-elou-ktc",
@@ -200,30 +201,22 @@ def _selected_scenarios() -> list[str]:
     return selected
 
 
-def _wrong_sequence(steps: list[CommandStep], rng: random.Random) -> list[CommandStep]:
+def _wrong_sequence(steps: list[CommandStep], _: random.Random) -> list[CommandStep]:
+    if len(steps) < 2:
+        raise AssertionError("wrong_sequence requires at least two steps")
     changed = list(steps)
-    first = rng.randrange(0, len(changed) - 1)
-    second = rng.randrange(first + 1, len(changed))
-    changed[first], changed[second] = changed[second], changed[first]
+    # Swap the first two expected actions. Unlike arbitrary swapping this always violates
+    # the deterministic assessment order at the beginning of the session.
+    changed[0], changed[1] = changed[1], changed[0]
     return changed
 
 
-def _missed_action(steps: list[CommandStep], rng: random.Random) -> list[CommandStep]:
-    omit_index = rng.randrange(len(steps))
-    return steps[:omit_index] + steps[omit_index + 1 :]
-
-
-def _late_action(steps: list[CommandStep], rng: random.Random) -> list[CommandStep]:
-    changed = list(steps)
-    late_index = rng.randrange(len(changed))
-    step = changed[late_index]
-    changed[late_index] = CommandStep(
-        step.equipment_id,
-        step.action,
-        step.payload,
-        delay_before_seconds=float(os.getenv("E2E_LATE_ACTION_DELAY_SECONDS", "6.2")),
-    )
-    return changed
+def _missed_action(steps: list[CommandStep], _: random.Random) -> list[CommandStep]:
+    if not steps:
+        raise AssertionError("missed_action requires at least one step")
+    # Omit the final expected step. Omitting a middle step makes later valid commands look like
+    # WRONG_SEQUENCE as well; dropping the last step produces a clean MISSED_ACTION on finalize.
+    return steps[:-1]
 
 
 def _replace_payload(
@@ -275,8 +268,6 @@ def _failure_plan(
         return _wrong_sequence(success, rng), "WRONG_SEQUENCE"
     if strategy == "missed_action":
         return _missed_action(success, rng), "MISSED_ACTION"
-    if strategy == "late_action":
-        return _late_action(success, rng), "LATE_ACTION"
     if strategy == "wrong_nd1_setpoint":
         return _replace_payload(success, ("ND1",), rng.choice((0, 45, 80))), "WRONG_ACTION"
     if strategy == "wrong_frc_setpoint":
@@ -349,10 +340,7 @@ def _run_session(
 
     _delay(rng)
     for step in steps:
-        if step.delay_before_seconds is None:
-            _delay(rng)
-        else:
-            time.sleep(step.delay_before_seconds)
+        _delay(rng)
         command = api.send_command(
             session_id,
             step.equipment_id,
@@ -429,12 +417,18 @@ def test_collect_training_sessions_for_all_oil_heating_scenarios() -> None:
     jobs = _collection_jobs(scenario_codes, runs, rng)
     print(
         f"training-data seed={seed}; runs_per_class_per_scenario={runs}; "
-        f"total_sessions={len(jobs)}; scenarios={','.join(scenario_codes)}"
+        f"total_sessions={len(jobs)}; scenarios={','.join(scenario_codes)}",
+        flush=True,
     )
 
-    for job in jobs:
+    for job_index, job in enumerate(jobs, start=1):
         spec = SCENARIOS[job.scenario_code]
         simulator_id, scenario_id = scenario_context[job.scenario_code]
+        print(
+            f"[{job_index}/{len(jobs)}] scenario={job.scenario_code} "
+            f"outcome={job.outcome} strategy={job.strategy} run={job.run}",
+            flush=True,
+        )
 
         if job.outcome == "success":
             steps = spec.success_plan(rng)
@@ -453,12 +447,16 @@ def test_collect_training_sessions_for_all_oil_heating_scenarios() -> None:
         errors = assessment["errors"]
         error_types = [str(item["error_type"]) for item in errors]
 
+        context = (
+            f"scenario={job.scenario_code} outcome={job.outcome} strategy={job.strategy} "
+            f"run={job.run} session_id={session_id} errors={error_types}"
+        )
         if job.outcome == "success":
-            assert result["error_count"] == 0, errors
+            assert result["error_count"] == 0, context
         else:
-            assert result["error_count"] > 0
-            assert expected_error is not None
-            assert expected_error in error_types, error_types
+            assert result["error_count"] > 0, context
+            assert expected_error is not None, context
+            assert expected_error in error_types, context
 
         _record(
             seed=seed,
