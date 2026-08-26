@@ -102,6 +102,18 @@ def wait_for_ml_risk_warning(driver: WebDriver, screenshot: Screenshot) -> bool:
         return False
 
 
+def wait_for_complete_result_page(driver: WebDriver, timeout: int) -> None:
+    """Wait for all result queries, including the potentially slow LLM debrief.
+
+    OperatorSessionResultPage keeps the whole result page in its loading state while
+    the debrief query is still pending. Waiting for both the page heading and the
+    debrief section therefore prevents screenshots from being taken before the LLM
+    request has finished (or the backend has returned its deterministic fallback).
+    """
+    text_element(driver, "Итоговый разбор сессии", timeout)
+    text_element(driver, "Интеллектуальный debrief", timeout)
+
+
 def stop_session_and_wait_for_result(driver: WebDriver) -> None:
     stop_button = wait(driver, 30).until(
         EC.element_to_be_clickable(
@@ -110,15 +122,20 @@ def stop_session_and_wait_for_result(driver: WebDriver) -> None:
     )
     stop_button.click()
 
+    # Local Ollama generation can easily take more than a minute on CPU.
+    # Keep this separate from ordinary Selenium waits so presentation capture can
+    # tolerate slow debrief generation without making every UI wait equally long.
+    result_timeout = max(1, int(os.getenv("E2E_PRESENTATION_RESULT_WAIT_SECONDS", "300")))
+
     try:
-        wait(driver, 150).until(EC.url_contains("/result"))
-        text_element(driver, "Итоговый разбор сессии", 150)
+        wait(driver, result_timeout).until(EC.url_contains("/result"))
+        wait_for_complete_result_page(driver, result_timeout)
     except Exception:
         retry = driver.find_elements(By.XPATH, "//button[normalize-space(.)='Повторить']")
         if not retry:
             raise
         retry[0].click()
-        text_element(driver, "Итоговый разбор сессии", 150)
+        wait_for_complete_result_page(driver, result_timeout)
 
 
 @pytest.mark.presentation
