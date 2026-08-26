@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 
 import pytest
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver, WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from tests.ktc_api import KtcApi
 
 
 Screenshot = Callable[[str], object]
@@ -17,6 +20,14 @@ Screenshot = Callable[[str], object]
 
 def wait(driver: WebDriver, seconds: int = 30) -> WebDriverWait:
     return WebDriverWait(driver, seconds)
+
+
+def xpath_literal(value: str) -> str:
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    return "concat(" + ", \"'\", ".join(f"'{part}'" for part in value.split("'")) + ")"
 
 
 def login(
@@ -40,15 +51,50 @@ def text_element(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
     )
 
 
-def scroll_to_text(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
-    element = text_element(driver, text, seconds)
-    driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", element)
+def exact_text_element(driver: WebDriver, text: str, seconds: int = 30) -> WebElement:
+    literal = xpath_literal(text)
+    xpath = f"//*[normalize-space(.)={literal} and not(.//*[normalize-space(.)={literal}])]"
+    return wait(driver, seconds).until(EC.visibility_of_element_located((By.XPATH, xpath)))
+
+
+def scroll_to_element(
+    driver: WebDriver,
+    element: WebElement,
+    *,
+    block: str = "start",
+    y_offset: int = 0,
+) -> None:
+    driver.execute_script(
+        "arguments[0].scrollIntoView({block: arguments[1], inline: 'nearest'});"
+        "window.scrollBy(0, arguments[2]);",
+        element,
+        block,
+        y_offset,
+    )
     time.sleep(0.5)
+
+
+def scroll_to_text(
+    driver: WebDriver,
+    text: str,
+    seconds: int = 30,
+    *,
+    y_offset: int = 0,
+) -> WebElement:
+    element = exact_text_element(driver, text, seconds)
+    scroll_to_element(driver, element, y_offset=y_offset)
     return element
 
 
-def save_after_scroll(driver: WebDriver, screenshot: Screenshot, text: str, name: str) -> None:
-    scroll_to_text(driver, text)
+def save_after_scroll(
+    driver: WebDriver,
+    screenshot: Screenshot,
+    text: str,
+    name: str,
+    *,
+    y_offset: int = 0,
+) -> None:
+    scroll_to_text(driver, text, y_offset=y_offset)
     screenshot(name)
 
 
@@ -63,6 +109,7 @@ def open_elou_simulator(driver: WebDriver) -> None:
         raise AssertionError("Карточка тренажёра ЭЛОУ не найдена")
     target.find_element(By.XPATH, ".//a[normalize-space(.)='Открыть']").click()
     text_element(driver, "Подготовка тренировки")
+    wait(driver).until(EC.element_to_be_clickable((By.XPATH, "//button[normalize-space(.)='Начать']")))
 
 
 def try_intentional_wrong_action(driver: WebDriver) -> None:
@@ -76,30 +123,133 @@ def try_intentional_wrong_action(driver: WebDriver) -> None:
             return
 
 
-def wait_for_ml_risk_warning(driver: WebDriver, screenshot: Screenshot) -> bool:
-    """Wait until the loaded model crosses its configured threshold.
+def wait_for_live_ai_risk_context(driver: WebDriver) -> None:
+    """Wait until the live screen shows both process risk facts and AI context.
 
-    The AI service exposes a non-null predicted_error_code only when the CatBoost
-    probability is greater than or equal to the threshold stored in model metadata.
-    Waiting for the prediction chip therefore follows the active model threshold
-    instead of hard-coding 20% in the Selenium test.
+    The CatBoost model exposes an elevated warning only when probability crosses
+    the model metadata threshold. Presentation capture should not fail only because
+    the current model returned, for example, 18% against a 20% threshold; in that
+    case the meaningful screen is still the visible process error plus the live
+    AI risk panel.
     """
-    timeout = max(1, int(os.getenv("E2E_PRESENTATION_AI_WAIT_SECONDS", "30")))
-    locator = (
+    timeout = max(1, int(os.getenv("E2E_PRESENTATION_AI_WAIT_SECONDS", "75")))
+    process_error_locator = (
         By.XPATH,
-        "//*[contains(normalize-space(.), 'Прогноз: ERROR_IN_NEXT_10_SECONDS')]",
+        "//*[contains(@class, 'MuiAlert') and "
+        "(contains(normalize-space(.), 'Ошибка') or contains(normalize-space(.), 'ошибка'))]",
     )
+    elevated_locator = (
+        By.XPATH,
+        "//*[contains(normalize-space(.), 'Прогноз: ERROR_IN_NEXT_10_SECONDS') "
+        "or contains(normalize-space(.), 'Повышенный риск ошибки')]",
+    )
+    risk_panel_locator = (
+        By.XPATH,
+        "//*[contains(normalize-space(.), 'Риск ошибки:') "
+        "or contains(normalize-space(.), 'Повышенный риск ошибки:')]",
+    )
+
+    wait(driver, timeout).until(EC.visibility_of_element_located(process_error_locator))
     try:
-        wait(driver, timeout).until(EC.visibility_of_element_located(locator))
-        return True
+        wait(driver, timeout).until(EC.visibility_of_element_located(elevated_locator))
     except TimeoutException:
+        wait(driver, 10).until(EC.visibility_of_element_located(risk_panel_locator))
         print(
-            f"ML risk warning did not appear within {timeout}s; "
-            "saving a diagnostic screenshot and continuing presentation capture.",
+            "ML elevated warning did not cross the active model threshold; "
+            "capturing visible AI risk context with process error.",
             flush=True,
         )
-        screenshot("presentation-05-live-ml-risk-diagnostic")
-        return False
+
+
+def operator_api() -> KtcApi:
+    api = KtcApi(
+        os.getenv("E2E_API_BASE_URL", "http://localhost:8000/api/v1"),
+        os.getenv("E2E_OPERATOR_USERNAME", "e2e-operator"),
+        os.getenv("E2E_OPERATOR_PASSWORD", "change-me-e2e-operator-password"),
+    )
+    api.login()
+    return api
+
+
+def current_session_id(driver: WebDriver) -> str:
+    match = re.search(r"/operator/sessions/([^/?#]+)", driver.current_url)
+    if match is None:
+        raise AssertionError(f"Не удалось определить session id из URL {driver.current_url!r}")
+    return match.group(1)
+
+
+def send_integrated_startup_progress(api: KtcApi, session_id: str) -> None:
+    """Create a partially successful session: enough correct work for a non-zero score.
+
+    The live UI remains responsible for the visual state, while API commands make the
+    assessment deterministic for presentation screenshots.
+    """
+    commands = [
+        ("KR1", "open", {}),
+        ("H1A", "start", {}),
+        ("ND1", "start", {}),
+        ("ND1", "set", {"value": 6}),
+        ("KR2", "open", {}),
+        ("KR3", "open", {}),
+        ("KR4", "open", {}),
+        ("FRC404", "set", {"value": 50}),
+        ("KR6", "open", {}),
+        ("FRC407", "set", {"value": 60}),
+        ("ND2", "set", {"value": 100}),
+        ("FRC408", "set", {"value": 100}),
+        ("E1", "apply_voltage", {}),
+    ]
+    for equipment_id, action, payload in commands:
+        api.send_command(session_id, equipment_id, action, payload)
+        time.sleep(0.2)
+
+
+def set_first_number_input(driver: WebDriver, label: str, value: str) -> None:
+    field = wait(driver).until(
+        EC.element_to_be_clickable(
+            (
+                By.XPATH,
+                f"(//label[normalize-space(.)={xpath_literal(label)}]/following::input[@type='number'])[1]",
+            ),
+        ),
+    )
+    field.send_keys(Keys.CONTROL, "a")
+    field.send_keys(value)
+
+
+def click_exact_button(driver: WebDriver, text: str, seconds: int = 30) -> None:
+    wait(driver, seconds).until(
+        EC.element_to_be_clickable(
+            (By.XPATH, f"//button[normalize-space(.)={xpath_literal(text)}]"),
+        ),
+    ).click()
+
+
+def open_operator_detail(driver: WebDriver, username: str) -> None:
+    row = wait(driver, 30).until(
+        EC.element_to_be_clickable(
+            (
+                By.XPATH,
+                f"//*[@role='link'][.//td[normalize-space(.)={xpath_literal(username)}]]",
+            ),
+        ),
+    )
+    row.click()
+    text_element(driver, f"@{username}", 30)
+
+
+def return_to_operator_list(driver: WebDriver) -> None:
+    driver.execute_script("window.scrollTo(0, 0);")
+    wait(driver, 30).until(
+        EC.element_to_be_clickable(
+            (
+                By.XPATH,
+                "//*[self::a or self::button][normalize-space(.)='К списку']",
+            ),
+        ),
+    ).click()
+    wait(driver, 30).until(EC.url_contains("/admin/operators"))
+    text_element(driver, "Операторы", 30)
 
 
 def wait_for_complete_result_page(driver: WebDriver, timeout: int) -> None:
@@ -156,28 +306,62 @@ def test_operator_presentation_screenshots(
 
     text_element(driver, "Тренажёры")
     screenshot("presentation-01-operator-catalog")
-    save_after_scroll(driver, screenshot, "История прохождений", "presentation-02-training-history")
+    save_after_scroll(
+        driver,
+        screenshot,
+        "История прохождений",
+        "presentation-02-training-history",
+        y_offset=140,
+    )
 
     driver.execute_script("window.scrollTo(0, 0);")
     open_elou_simulator(driver)
     screenshot("presentation-03-elou-scenario-selection")
 
-    wait(driver).until(
-        EC.element_to_be_clickable((By.XPATH, "//button[normalize-space(.)='Начать']")),
-    ).click()
+    click_exact_button(driver, "Начать")
     wait(driver, 60).until(EC.url_contains("/operator/sessions/"))
     text_element(driver, "AI-инструктор", 60)
-    screenshot("presentation-04-live-elou-and-ai-instructor")
+    screenshot("presentation-04a-live-elou-mnemoscheme-and-ai-instructor")
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Дозатор ND1",
+        "presentation-04b-live-control-panel",
+        y_offset=-120,
+    )
 
+    api = operator_api()
+    session_id = current_session_id(driver)
     try_intentional_wrong_action(driver)
-    if wait_for_ml_risk_warning(driver, screenshot):
-        screenshot("presentation-05-live-ml-risk-warning")
+    send_integrated_startup_progress(api, session_id)
+    set_first_number_input(driver, "Уставка, г/т", "100")
+    click_exact_button(driver, "Задать")
+    wait_for_live_ai_risk_context(driver)
+    screenshot("presentation-05-live-ai-risk-and-process-error")
 
     stop_session_and_wait_for_result(driver)
     screenshot("presentation-06-result-summary")
-    save_after_scroll(driver, screenshot, "Timeline ключевых событий", "presentation-07-timeline-ml-and-errors")
-    save_after_scroll(driver, screenshot, "Ошибки с объяснениями", "presentation-08-errors-with-explanations")
-    save_after_scroll(driver, screenshot, "Интеллектуальный debrief", "presentation-09-llm-debrief")
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Timeline ключевых событий",
+        "presentation-07-timeline-ml-and-errors",
+        y_offset=165,
+    )
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Ошибки с объяснениями",
+        "presentation-08-errors-with-explanations",
+        y_offset=100,
+    )
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Интеллектуальный debrief",
+        "presentation-09-llm-debrief",
+        y_offset=-110,
+    )
     save_after_scroll(
         driver,
         screenshot,
@@ -204,12 +388,33 @@ def test_admin_presentation_screenshots(
 
     text_element(driver, "Операторы")
     screenshot("presentation-11-admin-operators")
+    open_operator_detail(driver, os.getenv("E2E_OPERATOR_USERNAME", "e2e-operator"))
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Профиль навыков",
+        "presentation-12-operator-skill-profile",
+        y_offset=-120,
+    )
 
+    return_to_operator_list(driver)
     wait(driver).until(
         EC.element_to_be_clickable((By.XPATH, "//*[@role='tab' and normalize-space(.)='Обучение AI']")),
     ).click()
     text_element(driver, "Результаты обучения AI", 60)
-    screenshot("presentation-12-ai-models-overview")
+    screenshot("presentation-13-ai-models-overview")
 
-    save_after_scroll(driver, screenshot, "Метрики на валидации", "presentation-13-model-validation-metrics")
-    save_after_scroll(driver, screenshot, "Самые влиятельные признаки", "presentation-14-feature-importance")
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Метрики на валидации",
+        "presentation-14-model-validation-metrics",
+        y_offset=-120,
+    )
+    save_after_scroll(
+        driver,
+        screenshot,
+        "Самые влиятельные признаки",
+        "presentation-15-feature-importance",
+        y_offset=-120,
+    )
