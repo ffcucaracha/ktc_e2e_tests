@@ -4,11 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# The video walkthrough must use a local visible Chrome window. The script starts
-# screen recording first, runs the Selenium walkthrough, then stops the recorder.
-# X11 is supported automatically through ffmpeg/x11grab. On Wayland the script
-# can use wf-recorder when the compositor supports it; otherwise set
-# VIDEO_RECORDER_COMMAND to a recorder command that stays in the foreground.
 unset SELENIUM_REMOTE_URL
 
 export E2E_BASE_URL="${E2E_BASE_URL:-http://localhost:5173}"
@@ -19,7 +14,9 @@ export DEMO_RESULT_WAIT_SECONDS="${DEMO_RESULT_WAIT_SECONDS:-420}"
 VIDEO_DIR="${VIDEO_DIR:-$ROOT_DIR/artifacts/video}"
 mkdir -p "$VIDEO_DIR"
 VIDEO_FILE="${VIDEO_FILE:-$VIDEO_DIR/championship-demo-$(date +%Y%m%d-%H%M%S).mkv}"
-VIDEO_FPS="${VIDEO_FPS:-30}"
+VIDEO_FPS="${VIDEO_FPS:-25}"
+VIDEO_CRF="${VIDEO_CRF:-26}"
+VIDEO_MAX_WIDTH="${VIDEO_MAX_WIDTH:-1920}"
 VIDEO_RECORDER="${VIDEO_RECORDER:-auto}"
 VIDEO_RECORDER_PID=""
 
@@ -51,7 +48,6 @@ trap stop_recorder EXIT INT TERM
 start_recorder() {
   if [[ -n "${VIDEO_RECORDER_COMMAND:-}" ]]; then
     echo "Recorder: custom VIDEO_RECORDER_COMMAND"
-    # The custom command may use {output} as a placeholder for the target file.
     local command="${VIDEO_RECORDER_COMMAND//\{output\}/$VIDEO_FILE}"
     bash -lc "$command" &
     VIDEO_RECORDER_PID=$!
@@ -77,15 +73,16 @@ start_recorder() {
     fi
     screen_size="${screen_size:-1920x1080}"
 
-    echo "Recorder: ffmpeg/x11grab (${screen_size}, ${VIDEO_FPS} fps)"
+    echo "Recorder: ffmpeg/x11grab (${screen_size}, ${VIDEO_FPS} fps, CRF ${VIDEO_CRF}, max width ${VIDEO_MAX_WIDTH})"
     ffmpeg -y \
       -f x11grab \
       -framerate "$VIDEO_FPS" \
       -video_size "$screen_size" \
       -i "${DISPLAY}.0" \
+      -vf "scale='min(${VIDEO_MAX_WIDTH},iw)':-2" \
       -c:v libx264 \
       -preset veryfast \
-      -crf 20 \
+      -crf "$VIDEO_CRF" \
       -pix_fmt yuv420p \
       "$VIDEO_FILE" \
       >"$VIDEO_DIR/ffmpeg.log" 2>&1 &
@@ -123,6 +120,9 @@ echo "  app:             $E2E_BASE_URL"
 echo "  pace:            $DEMO_PACE"
 echo "  ML warning wait: ${DEMO_AI_WARNING_WAIT_SECONDS}s"
 echo "  result/LLM wait: ${DEMO_RESULT_WAIT_SECONDS}s"
+echo "  video fps:       $VIDEO_FPS"
+echo "  video CRF:       $VIDEO_CRF"
+echo "  video max width: $VIDEO_MAX_WIDTH"
 echo "  session type:    ${XDG_SESSION_TYPE:-unknown}"
 echo "  output:           $VIDEO_FILE"
 echo
